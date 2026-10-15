@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://vixor.pro/sitemap.xml
