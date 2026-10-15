@@ -1,0 +1,13 @@
+node_modules
+.next
+out
+.git
+.github
+scripts
+docs
+README.md
+*.log
+*.tar.gz
+.env*
+*.key
+*.pem

@@ -1,0 +1,91 @@
+name: Build, test and publish Vixor
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dockerhub-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOCKER_REPOSITORY: vixor-docker-auto
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Validate credentials
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          test -n "$DOCKER_USERNAME" || { echo "Missing DOCKER_USERNAME secret"; exit 1; }
+          test -n "$DOCKER_PASSWORD" || { echo "Missing DOCKER_PASSWORD secret (Docker Hub PAT)"; exit 1; }
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image for testing
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:latest
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Test Next.js inside the container
+        env:
+          IMAGE: ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:${{ github.sha }}
+        run: |
+          docker run -d --name vixor-ci -p 127.0.0.1:8080:3000 "$IMAGE"
+          trap 'docker logs vixor-ci; docker rm -f vixor-ci' EXIT
+          ready=0
+          for attempt in {1..30}; do
+            if curl --fail --silent --max-time 5 http://127.0.0.1:8080/ -o /tmp/vixor.html; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          test "$ready" = 1
+          grep -qi vixor /tmp/vixor.html
+          curl --fail --silent --max-time 10 http://127.0.0.1:8080/privacidad -o /dev/null
+          curl --fail --silent --max-time 10 http://127.0.0.1:8080/terminos -o /dev/null
+
+      - name: Create Docker Hub repository if missing
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: python3 scripts/ensure-dockerhub-repository.py
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Push tested image
+        env:
+          IMAGE: ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}
+        run: |
+          docker push "$IMAGE:${GITHUB_SHA}"
+          docker push "$IMAGE:latest"
+          echo "Published $IMAGE:latest and $IMAGE:$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
